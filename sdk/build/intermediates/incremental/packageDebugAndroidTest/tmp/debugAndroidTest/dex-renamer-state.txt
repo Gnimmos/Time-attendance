@@ -1,4 +1,4 @@
-#Wed Apr 23 15:10:21 EEST 2025
+#Thu Apr 24 09:44:56 EEST 2025
 base.0=C\:\\Users\\nicol\\AndroidStudioProjects\\MyApplication\\sdk\\build\\intermediates\\dex\\debugAndroidTest\\mergeExtDexDebugAndroidTest\\classes.dex
 base.1=C\:\\Users\\nicol\\AndroidStudioProjects\\MyApplication\\sdk\\build\\intermediates\\dex\\debugAndroidTest\\mergeLibDexDebugAndroidTest\\0\\classes.dex
 base.2=C\:\\Users\\nicol\\AndroidStudioProjects\\MyApplication\\sdk\\build\\intermediates\\dex\\debugAndroidTest\\mergeProjectDexDebugAndroidTest\\0\\classes.dex

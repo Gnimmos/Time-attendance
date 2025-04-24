@@ -10,7 +10,7 @@ import org.json.JSONObject
 
 object ApiService {
 
-        private const val BASE_URL = "http://192.168.10.164:3000"
+        private const val BASE_URL = "http://192.168.1.217:3000"
 
     fun checkEmployeePin(context: Context, pin: String, onResult: (Boolean, JSONObject?) -> Unit) {
         val url = "$BASE_URL/api/employees/check"
