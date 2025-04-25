@@ -13,12 +13,18 @@ import org.opencv.core.Mat
 import org.opencv.objdetect.CascadeClassifier
 import java.io.File
 import java.io.FileOutputStream
+import android.graphics.BitmapFactory
+import org.opencv.android.Utils
+import org.opencv.core.Rect
+import org.opencv.imgproc.Imgproc
+import org.opencv.core.Scalar
 
 class FaceDetectionActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListener2 {
 
     private lateinit var cameraView: JavaCameraView
     private var faceDetector: CascadeClassifier? = null
     private var faceDetectorHelper: FaceDetector? = null
+    private val recognizer = SimpleLBPHRecognizer()
 
     companion object {
         private const val CAMERA_PERMISSION_REQUEST = 1
@@ -101,14 +107,32 @@ class FaceDetectionActivity : AppCompatActivity(), CameraBridgeViewBase.CvCamera
     }
 
     override fun onCameraFrame(inputFrame: CameraBridgeViewBase.CvCameraViewFrame): Mat {
-        //val mat = inputFrame.rgba()
         val rgbaMat = inputFrame.rgba()
         val grayMat = inputFrame.gray()
 
-        faceDetectorHelper?.detectAndDrawFaces(rgbaMat, grayMat)
+        val detectedFaces = faceDetectorHelper?.detectFaces(grayMat)
+
+        detectedFaces?.forEach { rect: Rect ->
+            val faceROI = grayMat.submat(rect)
+            val name = recognizer.predict(faceROI)
+
+            Imgproc.rectangle(rgbaMat, rect.tl(), rect.br(), Scalar(0.0, 255.0, 0.0), 3)
+            Imgproc.putText(rgbaMat, name, rect.tl(), Imgproc.FONT_HERSHEY_SIMPLEX, 1.0, Scalar(255.0, 0.0, 0.0), 2)
+        }
 
         return rgbaMat
     }
+
+
+    private fun loadFaceFromAssets(fileName: String): Mat {
+        val inputStream = assets.open(fileName)
+        val bitmap = BitmapFactory.decodeStream(inputStream)
+        val mat = Mat()
+        Utils.bitmapToMat(bitmap, mat)
+        Imgproc.cvtColor(mat, mat, Imgproc.COLOR_RGBA2GRAY)
+        return mat
+    }
+
 
     override fun onPause() {
         super.onPause()

@@ -9,6 +9,7 @@ import android.view.LayoutInflater
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.*
 import org.opencv.android.OpenCVLoader
@@ -20,8 +21,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var dateText: TextView
     private lateinit var pinDots: LinearLayout
     private val pinBuilder = StringBuilder()
-    private val maxPinLength = 4
     private val handler = Handler(Looper.getMainLooper())
+    private var currentState = InputState.EMPLOYEE_ID
+    private val employeeIdBuilder = StringBuilder()
+    private var currentEmployeeNumber: Int = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,8 +67,105 @@ class MainActivity : AppCompatActivity() {
             checkOpenCVStatus()
         }
     }
+    private enum class InputState {
+        EMPLOYEE_ID, PIN
+    }
+
+    // at top of file
+    private fun getDeviceUUID(): String? {
+        return getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+            .getString("device_uuid", null)
+    }
+
+    // 2️⃣ Validate step (ID + PIN + deviceUUID)
+    private fun validateEmployeeLogin(employeeNumber: Int, pin: String) {
+        val uuid = getDeviceUUID().orEmpty()
+        if (uuid.isEmpty()) return Toast.makeText(this, "Device not registered.", Toast.LENGTH_SHORT).show().also { resetInput() }
+
+        ApiService.validateEmployee(this, employeeNumber, pin.toInt(), uuid) { success, employeeJson ->
+            if (success && employeeJson != null) {
+                val userName = employeeJson.optString("name", "Employee")
+                showActionDialog(userName)
+            } else {
+                Toast.makeText(this, "Invalid Number or PIN", Toast.LENGTH_SHORT).show()
+                resetInput()
+            }
+        }
+    }
+
+    private fun showActionDialog(userName: String) {
+        val actions = arrayOf("Clock In", "Clock Out", "Break Start", "Break Stop")
+        AlertDialog.Builder(this)
+            .setTitle("Hello, $userName!")
+            .setItems(actions) { _, which ->
+                val action = when (which) {
+                    0 -> "clock_in"
+                    1 -> "clock_out"
+                    2 -> "break_start"
+                    3 -> "break_stop"
+                    else -> ""
+                }
+                // use the 3-digit code, not the DB id
+                sendAttendanceAction(currentEmployeeNumber, action)
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    // 3️⃣ Clock-in/out & breaks all need deviceUUID
+    private fun sendAttendanceAction(employeeNumber: Int, action: String) {
+        val uuid = getDeviceUUID().orEmpty()
+        if (uuid.isEmpty()) return Toast.makeText(this, "Device not registered.", Toast.LENGTH_SHORT).show().also { resetInput() }
+
+        ApiService.recordAttendance(this, employeeNumber, action, uuid) { success ->
+            if (success) {
+                Toast.makeText(this, "Action '$action' recorded!", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Failed to record '$action'", Toast.LENGTH_SHORT).show()
+            }
+            resetInput()
+        }
+    }
 
     private fun handleKeyPress(value: String) {
+        when (currentState) {
+            InputState.EMPLOYEE_ID -> handleEmployeeIdInput(value)
+            InputState.PIN -> handlePinInput(value)
+        }
+    }
+
+    private fun handleEmployeeIdInput(value: String) {
+        when (value) {
+            "⌫" -> {
+                if (employeeIdBuilder.isNotEmpty()) {
+                    employeeIdBuilder.deleteAt(employeeIdBuilder.length - 1)
+                }
+            }
+
+            "x" -> {
+                employeeIdBuilder.clear()
+                Toast.makeText(this, "Employee ID cleared", Toast.LENGTH_SHORT).show()
+            }
+
+            else -> {
+                if (employeeIdBuilder.length < 3) {
+                    employeeIdBuilder.append(value)
+                    if (employeeIdBuilder.length == 3) {
+                        promptForPin()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun promptForPin() {
+        currentState = InputState.PIN
+        pinBuilder.clear()
+        updateDots()
+        Toast.makeText(this, "Please enter your 4-digit PIN", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun handlePinInput(value: String) {
         when (value) {
             "⌫" -> {
                 if (pinBuilder.isNotEmpty()) {
@@ -79,11 +179,12 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "PIN entry cleared", Toast.LENGTH_SHORT).show()
             }
             else -> {
-                if (pinBuilder.length < maxPinLength) {
+                if (pinBuilder.length < 4) {
                     pinBuilder.append(value)
                     updateDots()
-                    if (pinBuilder.length == maxPinLength) {
-                        validatePin(pinBuilder.toString())
+                    if (pinBuilder.length == 4) {
+                        currentEmployeeNumber = employeeIdBuilder.toString().toInt()
+                        validateEmployeeLogin(currentEmployeeNumber, pinBuilder.toString())
                     }
                 }
             }
@@ -97,28 +198,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun validatePin(pin: String) {
-        val companyId = getCompanyId()
-        if (companyId == null) {
-            Toast.makeText(this, "Company ID not set. Admin must configure it first.", Toast.LENGTH_LONG).show()
-            pinBuilder.clear()
-            updateDots()
-            return
-        }
 
-        ApiService.checkEmployeePin(this, pin) { success, user ->
-            if (success && user?.optInt("companyId") == companyId) {
-                val name = user.optString("firstName", "User")
-                Toast.makeText(this, "Welcome $name!", Toast.LENGTH_SHORT).show()
-                // TODO: Navigate to next screen
-            } else {
-                Toast.makeText(this, "Invalid PIN or Company mismatch", Toast.LENGTH_SHORT).show()
-                pinBuilder.clear()
-                updateDots()
-            }
-        }
+    private fun resetInput() {
+        currentState = InputState.EMPLOYEE_ID
+        employeeIdBuilder.clear()
+        pinBuilder.clear()
+        updateDots()
     }
-
 
     private fun startClock() {
         val clockRunnable = object : Runnable {
@@ -151,14 +237,7 @@ class MainActivity : AppCompatActivity() {
         val dateFormat = SimpleDateFormat("EEEE, MMMM d", Locale.getDefault())
         dateText.text = dateFormat.format(calendar.time)
     }
-    private fun saveCompanyIdLocally(companyId: Int, companyName: String = "") {
-        val editor = getSharedPreferences("app_prefs", Context.MODE_PRIVATE).edit()
-        editor.putInt("company_id", companyId)
-        if (companyName.isNotEmpty()) {
-            editor.putString("company_name", companyName)
-        }
-        editor.apply()
-    }
+
     private fun getCompanyNameFromPrefs(): String? {
         val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
         return prefs.getString("company_name", null)
@@ -170,99 +249,126 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAdminPinDialog() {
-        val pinInput = EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
-            hint = "Enter Admin PIN"
+        val passwordInput = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Enter Admin Password"
         }
 
         AlertDialog.Builder(this)
             .setTitle("Admin Access")
-            .setView(pinInput)
+            .setView(passwordInput)
             .setPositiveButton("Verify") { _, _ ->
-                val enteredPin = pinInput.text.toString()
+                val enteredPassword = passwordInput.text.toString()
 
-                ApiService.superUserLogin(this, enteredPin) { success, company ->
-                    if (success && company != null) {
-                        val companyId = company.optInt("companyId", -1)
-                        if (companyId != -1) {
-                            saveCompanyIdLocally(companyId)
-                            showSettingsDialog(company.optString("companyName", "Unknown"), companyId.toString())
+                ApiService.superUserLogin(this, enteredPassword) { success ->
+                    if (success) {
+                        if (!isDeviceRegistered()) {
+                            promptForDeviceRegistration()
                         } else {
-                            Toast.makeText(this, "Company info missing", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this, "Device already registered.", Toast.LENGTH_SHORT).show()
+                            showRegisteredDeviceInfo()
                         }
                     } else {
-                        Toast.makeText(this, "Invalid Admin password", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "Invalid Admin Password", Toast.LENGTH_SHORT).show()
                     }
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
-
     }
-    private fun promptForCompanyId() {
-        val companyIdInput = EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            hint = "Enter Company ID"
+    private fun getOrCreateDeviceUUID(): String {
+        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        var uuid = prefs.getString("device_uuid", null)
+
+        if (uuid == null) {
+            uuid = UUID.randomUUID().toString()
+            prefs.edit().putString("device_uuid", uuid).apply()
         }
 
-        AlertDialog.Builder(this)
-            .setTitle("Set Company ID")
-            .setView(companyIdInput)
-            .setPositiveButton("Verify") { _, _ ->
-                val enteredCompanyId = companyIdInput.text.toString().toIntOrNull()
+        return uuid
+    }
 
-                if (enteredCompanyId != null) {
-                    ApiService.getCompanyInfo(this, enteredCompanyId) { success, company ->
-                        if (success) {
-                            val companyName = company?.optString("name") ?: "Unknown"
-                            // Save locally
-                            saveCompanyIdLocally(enteredCompanyId)
-                            showSettingsDialog(companyName, enteredCompanyId.toString())
-                        } else {
-                            Toast.makeText(this, "Company ID not found in DB", Toast.LENGTH_SHORT).show()
-                            promptForCompanyId() // Retry
-                        }
+    private fun showRegisteredDeviceInfo() {
+        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        val companyName = prefs.getString("company_name", "Unknown Company")
+        val companyId = prefs.getInt("company_id", -1)
+        val outletName = prefs.getString("outlet_name", "No Outlet")
+        val outletId = prefs.getInt("outlet_id", -1)
+        val deviceId = prefs.getInt("device_id", -1)
+
+        val infoMessage = """
+        ✅ Device ID: $deviceId
+        🏢 Company: $companyName (ID: $companyId)
+        📍 Outlet: $outletName (ID: ${if (outletId != -1) outletId else "N/A"})
+    """.trimIndent()
+
+        AlertDialog.Builder(this)
+            .setTitle("Registered Device Info")
+            .setMessage(infoMessage)
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    private fun isDeviceRegistered(): Boolean {
+        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        return prefs.contains("device_id")
+    }
+
+    private fun promptForDeviceRegistration() {
+        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_register_device, null)
+        val companyIdInput = dialogView.findViewById<EditText>(R.id.companyIdInput)
+        val deviceNameInput = dialogView.findViewById<EditText>(R.id.deviceNameInput)
+        val outletIdInput   = dialogView.findViewById<EditText>(R.id.outletIdInput)
+
+        AlertDialog.Builder(this)
+            .setTitle("Register Device")
+            .setView(dialogView)
+            .setPositiveButton("Register") { _, _ ->
+                val companyId = companyIdInput.text.toString().toIntOrNull() ?: return@setPositiveButton
+                val outletId  = outletIdInput.text.toString().toIntOrNull() ?: 0
+                val name      = deviceNameInput.text.toString().trim()
+                val uuid      = getOrCreateDeviceUUID()
+
+                ApiService.registerDevice(this, companyId, outletId, uuid, name) { success, serverDeviceId, company, outlet ->
+                    if (success && serverDeviceId != -1) {
+                        // persist both the client‐side UUID and the server‐side numeric ID
+                        getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+                            .edit()
+                            .putString("device_uuid", uuid)
+                            .putInt("device_id", serverDeviceId)
+                            .apply()
+
+                        // also save company/outlet in prefs
+                        saveDeviceInfo(serverDeviceId, company!!, outlet)
+
+                        Toast.makeText(this, "Device Registered Successfully!", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this, "Device Registration Failed", Toast.LENGTH_SHORT).show()
+                        promptForDeviceRegistration()
                     }
-                } else {
-                    Toast.makeText(this, "Please enter a valid number", Toast.LENGTH_SHORT).show()
-                    promptForCompanyId() // Retry
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
-    private fun saveCompanyIdLocally(companyId: Int) {
-        getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-            .edit()
-            .putInt("company_id", companyId)
-            .apply()
+
+    private fun saveDeviceInfo(deviceId: Int, company: JSONObject, outlet: JSONObject?) {
+        val editor = getSharedPreferences("app_prefs", Context.MODE_PRIVATE).edit()
+        editor.putInt("device_id", deviceId)
+        editor.putInt("company_id", company.optInt("id"))
+        editor.putString("company_name", company.optString("name"))
+
+        if (outlet != null) {
+            editor.putInt("outlet_id", outlet.optInt("id"))
+            editor.putString("outlet_name", outlet.optString("name"))
+        } else {
+            editor.remove("outlet_id")
+            editor.remove("outlet_name")
+        }
+
+        editor.apply()
     }
-    private fun getCompanyId(): Int? {
-        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        val id = prefs.getInt("company_id", -1)
-        return if (id != -1) id else null
-    }
 
-
-    private fun showSettingsDialog(companyName: String, currentCompanyId: String) {
-        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_settings_admin, null)
-        val companyNameText = dialogView.findViewById<TextView>(R.id.companyNameText)
-        val companyIdInput = dialogView.findViewById<EditText>(R.id.companyIdInput)
-
-        companyNameText.text = companyName
-        companyIdInput.setText(currentCompanyId)
-
-        AlertDialog.Builder(this)
-            .setTitle("Company Settings")
-            .setView(dialogView)
-            .setPositiveButton("Save") { _, _ ->
-                val newCompanyId = companyIdInput.text.toString()
-                Toast.makeText(this, "Saved Company ID: $newCompanyId", Toast.LENGTH_SHORT).show()
-                // TODO: Save the company ID to database
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
     private fun checkOpenCVStatus() {
         if (OpenCVLoader.initDebug()) {
             Toast.makeText(this, "OpenCV Loaded Successfully!", Toast.LENGTH_SHORT).show()

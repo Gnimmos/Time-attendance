@@ -33,6 +33,14 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    sourceSets {
+        named("main") {
+            jniLibs.srcDirs("src/main/jniLibs")
+            resources.srcDir("libs")
+        }
+    }
+
 }
 
 dependencies {
@@ -47,4 +55,5 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     implementation(project(":opencv"))
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
 }
