@@ -1,47 +1,83 @@
 package com.example.myapplication
 
-import android.content.Context
-import android.content.Intent
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.view.LayoutInflater
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.*
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import org.json.JSONObject
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import org.opencv.android.OpenCVLoader
+import android.content.Context
+import android.content.Intent
+import android.view.LayoutInflater
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import android.util.Log
+import java.util.Locale
+
+
 
 class MainActivity : AppCompatActivity() {
+    companion object {
+        private const val REQUEST_CAMERA_PERMISSION = 10
+    }
 
+    // UI
     private lateinit var clockText: TextView
     private lateinit var greetingText: TextView
     private lateinit var dateText: TextView
     private lateinit var pinDots: LinearLayout
-    private val pinBuilder = StringBuilder()
+    private lateinit var promptText: TextView
+
+    // CameraX
+    private lateinit var previewView: PreviewView
+    private lateinit var imageCapture: ImageCapture
+    private lateinit var cameraExecutor: ExecutorService
+
+    // PIN / attendance
     private val handler = Handler(Looper.getMainLooper())
     private var currentState = InputState.EMPLOYEE_ID
     private val employeeIdBuilder = StringBuilder()
     private var currentEmployeeNumber: Int = 0
+    private lateinit var pinManager: PinEntryManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        clockText = findViewById(R.id.clockText)
-        greetingText = findViewById(R.id.greetingText)
-        dateText = findViewById(R.id.dateText)
-        pinDots = findViewById(R.id.pinDots)
+        previewView   = findViewById(R.id.previewView)
+        clockText     = findViewById(R.id.clockText)
+        greetingText  = findViewById(R.id.greetingText)
+        dateText      = findViewById(R.id.dateText)
+        pinDots       = findViewById(R.id.pinDots)
+        promptText = findViewById(R.id.promptText)
+        cameraExecutor = Executors.newSingleThreadExecutor()
 
         // Set up keypad buttons
-        val keypad = findViewById<GridLayout>(R.id.keypad)
-        for (i in 0 until keypad.childCount) {
-            val button = keypad.getChildAt(i) as Button
-            button.setOnClickListener {
-                handleKeyPress(button.text.toString())
-            }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED) {
+            startCamera()
+        } else {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.CAMERA),
+                REQUEST_CAMERA_PERMISSION
+            )
         }
 
         // Set current time and start clock
@@ -50,15 +86,6 @@ class MainActivity : AppCompatActivity() {
         // Set greeting and date
         setGreetingAndDate()
 
-        // Clock in/out buttons
-        findViewById<Button>(R.id.clockInButton).setOnClickListener {
-            Toast.makeText(this, "Clock In Clicked", Toast.LENGTH_SHORT).show()
-        }
-
-        findViewById<Button>(R.id.clockOutButton).setOnClickListener {
-            Toast.makeText(this, "Clock Out Clicked", Toast.LENGTH_SHORT).show()
-        }
-
         // Settings icon
         findViewById<ImageView>(R.id.settingsIcon)?.setOnClickListener {
             showAdminPinDialog()
@@ -66,6 +93,38 @@ class MainActivity : AppCompatActivity() {
         findViewById<ImageView>(R.id.cameraIcon)?.setOnClickListener {
             checkOpenCVStatus()
         }
+        ensurePinDots(3)             // start in “employee ID” mode
+        promptText.text = "Please enter Employee ID"
+        val keypad = findViewById<GridLayout>(R.id.keypad)
+        for (i in 0 until keypad.childCount) {
+            (keypad.getChildAt(i) as Button).setOnClickListener {
+                handleKeyPress((it as Button).text.toString())
+            }
+        }
+        pinManager = PinEntryManager(
+                       maxAttempts = 3,
+                       isValidPin = { pin -> DatabaseHelper(this).isValidPin(pin) },
+                       onSuccess = { pin ->
+                               // when valid, convert employeeIdBuilder → Int and call your existing validateEmployeeLogin
+                               val empId = employeeIdBuilder.toString().toInt()
+                                currentEmployeeNumber = empId
+                                capturePhoto()
+                              validateEmployeeLogin(empId, pin)
+                           },
+                       onFailure = { rem ->
+                               Toast.makeText(this, "Wrong PIN, $rem tries left", Toast.LENGTH_SHORT).show()
+                               animateDotFailure()
+                           },
+            onLocked = {
+                               Toast.makeText(this, "Too many attempts. Locked.", Toast.LENGTH_LONG).show()
+                               // you could disable keypad here for 30s...
+                          }
+                          )
+        updateDots(0)
+    }
+
+    private fun animateDotFailure() {
+        updateDots(0)
     }
     private enum class InputState {
         EMPLOYEE_ID, PIN
@@ -79,15 +138,17 @@ class MainActivity : AppCompatActivity() {
 
     // 2️⃣ Validate step (ID + PIN + deviceUUID)
     private fun validateEmployeeLogin(employeeNumber: Int, pin: String) {
-        val uuid = getDeviceUUID().orEmpty()
-        if (uuid.isEmpty()) return Toast.makeText(this, "Device not registered.", Toast.LENGTH_SHORT).show().also { resetInput() }
-
-        ApiService.validateEmployee(this, employeeNumber, pin.toInt(), uuid) { success, employeeJson ->
-            if (success && employeeJson != null) {
-                val userName = employeeJson.optString("name", "Employee")
-                showActionDialog(userName)
+        if (!isDeviceRegistered()) {
+            Toast.makeText(this, "Device not registered.", Toast.LENGTH_SHORT).show()
+            resetInput()
+            return
+        }
+        val uuid = getDeviceUUID()!!
+        ApiService.validateEmployee(this, employeeNumber, pin.toInt(), uuid) { success, empJson ->
+            if (success && empJson != null) {
+                showActionDialog(empJson.optString("name","name"))
             } else {
-                Toast.makeText(this, "Invalid Number or PIN", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this,"Invalid Number or PIN",Toast.LENGTH_SHORT).show()
                 resetInput()
             }
         }
@@ -111,27 +172,162 @@ class MainActivity : AppCompatActivity() {
             .setCancelable(false)
             .show()
     }
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_CAMERA_PERMISSION &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startCamera()
+        }
+    }
+    private fun startCamera() {
+        val camProviderF = ProcessCameraProvider.getInstance(this)
+        camProviderF.addListener({
+            val camProvider = camProviderF.get()
+            val preview = Preview.Builder().build()
+                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            imageCapture = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .build()
+            val selector = CameraSelector.DEFAULT_FRONT_CAMERA
 
-    // 3️⃣ Clock-in/out & breaks all need deviceUUID
+            camProvider.unbindAll()
+            camProvider.bindToLifecycle(this, selector, preview, imageCapture)
+        }, ContextCompat.getMainExecutor(this))
+    }
     private fun sendAttendanceAction(employeeNumber: Int, action: String) {
-        val uuid = getDeviceUUID().orEmpty()
-        if (uuid.isEmpty()) return Toast.makeText(this, "Device not registered.", Toast.LENGTH_SHORT).show().also { resetInput() }
-
-        ApiService.recordAttendance(this, employeeNumber, action, uuid) { success ->
-            if (success) {
-                Toast.makeText(this, "Action '$action' recorded!", Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this, "Failed to record '$action'", Toast.LENGTH_SHORT).show()
-            }
+        if (!isDeviceRegistered()) {
+            Toast.makeText(this, "Device not registered.", Toast.LENGTH_SHORT).show()
             resetInput()
+            return
+        }
+
+        currentEmployeeNumber = employeeNumber
+        val uuid = getDeviceUUID()!!
+
+        // 1) Prepare temp file for photo
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val photoFile = File(cacheDir, "${employeeNumber}_${action}_$timestamp.jpg")
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+
+        // 2) Take picture
+        imageCapture.takePicture(outputOptions, ContextCompat.getMainExecutor(this),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onError(exc: ImageCaptureException) {
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Photo capture failed: ${exc.message}",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        resetInput()
+                    }
+                }
+
+                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                    // 3) First record the punch (so times go in)
+                    ApiService.recordAttendance(
+                        this@MainActivity,
+                        employeeNumber,
+                        action,
+                        uuid
+                    ) { punchOk ->
+                        runOnUiThread {
+                            if (!punchOk) {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Failed to record attendance",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                resetInput()
+                                return@runOnUiThread
+                            }
+
+                            // 4) Then upload the photo
+                            ApiService.recordAttendanceWithPhoto(
+                                this@MainActivity,
+                                employeeNumber,
+                                action,
+                                uuid,
+                                photoFile
+                            ) { photoOk, urls ->
+                                runOnUiThread {
+                                    if (photoOk) {
+                                        Toast.makeText(
+                                            this@MainActivity,
+                                            "✅ Attendance and photo both recorded!",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    } else {
+                                        Toast.makeText(
+                                            this@MainActivity,
+                                            "⚠️ Attendance saved but photo upload failed",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                    resetInput()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+
+    private fun capturePhoto() {
+        val photoFile = File(cacheDir,
+            SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
+                .format(System.currentTimeMillis()) + ".jpg"
+        )
+        val opts = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+        imageCapture.takePicture(opts, ContextCompat.getMainExecutor(this),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onError(exc: ImageCaptureException) {
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity,
+                            "Photo capture failed", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                override fun onImageSaved(results: ImageCapture.OutputFileResults) {
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity,
+                            "Photo taken: ${photoFile.name}", Toast.LENGTH_SHORT).show()
+                    }
+                    // TODO: upload `photoFile` or send its path to your backend
+                }
+            })
+    }
+
+
+    private fun ensurePinDots(count: Int) {
+        if (pinDots.childCount != count) {
+            pinDots.removeAllViews()
+            repeat(count) {
+                val dot = LayoutInflater.from(this)
+                    .inflate(R.layout.view_pin_dot, pinDots, false)
+                pinDots.addView(dot)
+            }
         }
     }
 
     private fun handleKeyPress(value: String) {
         when (currentState) {
             InputState.EMPLOYEE_ID -> handleEmployeeIdInput(value)
-            InputState.PIN -> handlePinInput(value)
+            InputState.PIN        -> {
+                pinManager.onKey(value)
+                updateDots(pinManager.length())
+            }
         }
+    }
+    private fun handlePinInput(value: String) {
+        // 1) Feed the keystroke to the manager:
+        pinManager.onKey(value)
+        // 2) Update the 4-dot UI to match its internal length:
+        updateDots(pinManager.length())
     }
 
     private fun handleEmployeeIdInput(value: String) {
@@ -144,12 +340,16 @@ class MainActivity : AppCompatActivity() {
 
             "x" -> {
                 employeeIdBuilder.clear()
+                ensurePinDots(3)             // start in “employee ID” mode
+                promptText.text = "Please enter Employee ID"
+                resetInput()
                 Toast.makeText(this, "Employee ID cleared", Toast.LENGTH_SHORT).show()
             }
 
             else -> {
                 if (employeeIdBuilder.length < 3) {
                     employeeIdBuilder.append(value)
+                    updateDots(employeeIdBuilder.length)
                     if (employeeIdBuilder.length == 3) {
                         promptForPin()
                     }
@@ -160,50 +360,28 @@ class MainActivity : AppCompatActivity() {
 
     private fun promptForPin() {
         currentState = InputState.PIN
-        pinBuilder.clear()
-        updateDots()
-        Toast.makeText(this, "Please enter your 4-digit PIN", Toast.LENGTH_SHORT).show()
+        ensurePinDots(4)           // now show 4 dots
+        updateDots(0)
+        promptText.text = "Please enter your 4-digit PIN"
     }
 
-    private fun handlePinInput(value: String) {
-        when (value) {
-            "⌫" -> {
-                if (pinBuilder.isNotEmpty()) {
-                    pinBuilder.deleteAt(pinBuilder.length - 1)
-                    updateDots()
-                }
-            }
-            "x" -> {
-                pinBuilder.clear()
-                updateDots()
-                Toast.makeText(this, "PIN entry cleared", Toast.LENGTH_SHORT).show()
-            }
-            else -> {
-                if (pinBuilder.length < 4) {
-                    pinBuilder.append(value)
-                    updateDots()
-                    if (pinBuilder.length == 4) {
-                        currentEmployeeNumber = employeeIdBuilder.toString().toInt()
-                        validateEmployeeLogin(currentEmployeeNumber, pinBuilder.toString())
-                    }
-                }
-            }
-        }
-    }
 
-    private fun updateDots() {
+
+    private fun updateDots(filled: Int) {
         for (i in 0 until pinDots.childCount) {
-            val dot = pinDots.getChildAt(i)
-            dot.alpha = if (i < pinBuilder.length) 1f else 0.3f
+            pinDots.getChildAt(i).alpha = if (i < filled) 1f else 0.3f
         }
     }
+
 
 
     private fun resetInput() {
         currentState = InputState.EMPLOYEE_ID
         employeeIdBuilder.clear()
-        pinBuilder.clear()
-        updateDots()
+        pinManager.onKey("x")
+        ensurePinDots(3)           // back to 3 placeholders
+        updateDots(0)
+        promptText.text = "Please enter Employee ID"
     }
 
     private fun startClock() {
@@ -246,6 +424,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
+        cameraExecutor.shutdown()
     }
 
     private fun showAdminPinDialog() {
@@ -310,8 +489,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isDeviceRegistered(): Boolean {
-        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        return prefs.contains("device_id")
+        return getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+            .contains("device_id")
     }
 
     private fun promptForDeviceRegistration() {
@@ -340,7 +519,8 @@ class MainActivity : AppCompatActivity() {
 
                         // also save company/outlet in prefs
                         saveDeviceInfo(serverDeviceId, company!!, outlet)
-
+                        resetInput()
+                        findViewById<TextView>(R.id.promptText).text = "Please enter Employee ID"
                         Toast.makeText(this, "Device Registered Successfully!", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(this, "Device Registration Failed", Toast.LENGTH_SHORT).show()
