@@ -37,8 +37,9 @@ class PinEntryManager(
         if (builder.isNotEmpty()) builder.deleteCharAt(builder.lastIndex)
     }
 
-    private fun clear() {
+    fun clear() {
         builder.clear()
+        attemptsLeft = maxAttempts
     }
 
     /** Expose current length so UI can update dots */

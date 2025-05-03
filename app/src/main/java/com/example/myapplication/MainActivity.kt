@@ -20,6 +20,7 @@ import java.util.concurrent.Executors
 import org.opencv.android.OpenCVLoader
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
 import android.view.LayoutInflater
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -55,6 +56,7 @@ class MainActivity : AppCompatActivity() {
     private val employeeIdBuilder = StringBuilder()
     private var currentEmployeeNumber: Int = 0
     private lateinit var pinManager: PinEntryManager
+    var currentEmployeeName =""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,6 +81,12 @@ class MainActivity : AppCompatActivity() {
                 REQUEST_CAMERA_PERMISSION
             )
         }
+        if (isNetworkAvailable()) {
+            DatabaseHelper(this).syncEmployeesFromApi(this)
+            DatabaseHelper(this).syncPendingAttendance(this)
+        }
+
+
 
         // Set current time and start clock
         startClock()
@@ -91,7 +99,7 @@ class MainActivity : AppCompatActivity() {
             showAdminPinDialog()
         }
         findViewById<ImageView>(R.id.cameraIcon)?.setOnClickListener {
-            checkOpenCVStatus()
+           // checkOpenCVStatus()
         }
         ensurePinDots(3)             // start in “employee ID” mode
         promptText.text = "Please enter Employee ID"
@@ -103,24 +111,41 @@ class MainActivity : AppCompatActivity() {
         }
         pinManager = PinEntryManager(
                        maxAttempts = 3,
-                       isValidPin = { pin -> DatabaseHelper(this).isValidPin(pin) },
+            isValidPin = { pin ->
+                val empId = employeeIdBuilder.toString()
+                DatabaseHelper(this).isValidEmployeePin(empId, pin)
+            },
                        onSuccess = { pin ->
                                // when valid, convert employeeIdBuilder → Int and call your existing validateEmployeeLogin
-                               val empId = employeeIdBuilder.toString().toInt()
-                                currentEmployeeNumber = empId
-                                capturePhoto()
-                              validateEmployeeLogin(empId, pin)
-                           },
+                           val empId = employeeIdBuilder.toString().toInt()
+                           currentEmployeeNumber = empId
+                           capturePhoto()
+                           if (isNetworkAvailable()) {
+                               // online validation
+                               capturePhoto()
+                               validateEmployeeLogin(currentEmployeeNumber, pin)
+                           } else {
+                               // offline: trust local DB and show dialog
+                               currentEmployeeName = "Employee #$empId" // or get name if cached
+                               showActionDialog(currentEmployeeName)
+                           }                           },
                        onFailure = { rem ->
                                Toast.makeText(this, "Wrong PIN, $rem tries left", Toast.LENGTH_SHORT).show()
                                animateDotFailure()
                            },
             onLocked = {
-                               Toast.makeText(this, "Too many attempts. Locked.", Toast.LENGTH_LONG).show()
-                               // you could disable keypad here for 30s...
-                          }
+                Toast.makeText(this, "Too many incorrect attempts. Returning to ID input.", Toast.LENGTH_SHORT).show()
+                resetInput() // 🔁 Return to EMPLOYEE_ID mode
+                pinManager.clear()
+            }
+
+
                           )
         updateDots(0)
+    }
+    fun isNetworkAvailable(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        return cm.activeNetworkInfo?.isConnectedOrConnecting == true
     }
 
     private fun animateDotFailure() {
@@ -146,7 +171,14 @@ class MainActivity : AppCompatActivity() {
         val uuid = getDeviceUUID()!!
         ApiService.validateEmployee(this, employeeNumber, pin.toInt(), uuid) { success, empJson ->
             if (success && empJson != null) {
-                showActionDialog(empJson.optString("name","name"))
+                Log.d("Login", "Server returned: ${empJson.toString(2)}")
+                val empId = empJson.optString("employeeNumber", employeeNumber.toString())
+                val pinUsed = pin  // The one entered by user
+                Log.i("Login", "Online validation success for $empId. Saving to local DB.")
+                DatabaseHelper(this).upsertEmployee(empId, pinUsed)
+
+                currentEmployeeName = empJson.optString("name", "Employee")
+                showActionDialog(currentEmployeeName)
             } else {
                 Toast.makeText(this,"Invalid Number or PIN",Toast.LENGTH_SHORT).show()
                 resetInput()
@@ -159,15 +191,18 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Hello, $userName!")
             .setItems(actions) { _, which ->
-                val action = when (which) {
+                // map the human label to your API keys:
+                val actionKey = when (which) {
                     0 -> "clock_in"
                     1 -> "clock_out"
                     2 -> "break_start"
                     3 -> "break_stop"
                     else -> ""
                 }
-                // use the 3-digit code, not the DB id
-                sendAttendanceAction(currentEmployeeNumber, action)
+                val actionLabel = actions[which]
+                // Display "<Name> – <Action>" under the keyboard:
+                promptText.text = "$userName – $actionLabel"
+                sendAttendanceAction(currentEmployeeNumber, actionKey, actionLabel)
             }
             .setCancelable(false)
             .show()
@@ -197,7 +232,11 @@ class MainActivity : AppCompatActivity() {
             camProvider.bindToLifecycle(this, selector, preview, imageCapture)
         }, ContextCompat.getMainExecutor(this))
     }
-    private fun sendAttendanceAction(employeeNumber: Int, action: String) {
+    private fun sendAttendanceAction(
+        employeeNumber: Int,
+        action: String,
+        actionLabel: String
+    ) {
         if (!isDeviceRegistered()) {
             Toast.makeText(this, "Device not registered.", Toast.LENGTH_SHORT).show()
             resetInput()
@@ -213,7 +252,8 @@ class MainActivity : AppCompatActivity() {
         val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
 
         // 2) Take picture
-        imageCapture.takePicture(outputOptions, ContextCompat.getMainExecutor(this),
+        imageCapture.takePicture(
+            outputOptions, ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onError(exc: ImageCaptureException) {
                     runOnUiThread {
@@ -227,54 +267,85 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    // 3) First record the punch (so times go in)
-                    ApiService.recordAttendance(
-                        this@MainActivity,
-                        employeeNumber,
-                        action,
-                        uuid
-                    ) { punchOk ->
-                        runOnUiThread {
-                            if (!punchOk) {
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Failed to record attendance",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                resetInput()
-                                return@runOnUiThread
-                            }
+                    if (isNetworkAvailable()) {
+                        // Attempt to send punch to server
+                        ApiService.recordAttendance(
+                            this@MainActivity,
+                            employeeNumber,
+                            action,
+                            uuid
+                        ) { punchOk ->
+                            runOnUiThread {
+                                if (punchOk) {
+                                    // Now upload photo
+                                    Log.i("Attendance", "✅ Live punch succeeded: $employeeNumber – $action")
+                                    ApiService.recordAttendanceWithPhoto(
+                                        this@MainActivity,
+                                        employeeNumber,
+                                        action,
+                                        uuid,
+                                        photoFile
+                                    ) { photoOk, _ ->
+                                        runOnUiThread {
+                                            if (photoOk) {
+                                                promptText.text =
+                                                    "$actionLabel saved for $currentEmployeeName"
+                                            } else {
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    "Photo upload failed",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
 
-                            // 4) Then upload the photo
-                            ApiService.recordAttendanceWithPhoto(
-                                this@MainActivity,
-                                employeeNumber,
-                                action,
-                                uuid,
-                                photoFile
-                            ) { photoOk, urls ->
-                                runOnUiThread {
-                                    if (photoOk) {
-                                        Toast.makeText(
-                                            this@MainActivity,
-                                            "✅ Attendance and photo both recorded!",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                    } else {
-                                        Toast.makeText(
-                                            this@MainActivity,
-                                            "⚠️ Attendance saved but photo upload failed",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
+                                                // Fallback: save for later
+                                                DatabaseHelper(this@MainActivity)
+                                                    .addPendingAttendance(
+                                                        employeeNumber.toString(),
+                                                        action,
+                                                        uuid,
+                                                        photoFile.absolutePath
+                                                    )
+                                            }
+                                            handler.postDelayed({ resetInput() }, 3000L)
+                                        }
                                     }
-                                    resetInput()
+                                } else {
+                                    // Fallback: save both punch and photo offline
+                                    Log.w("Attendance", "❌ Live punch failed: $employeeNumber – $action. Saving offline.")
+                                    DatabaseHelper(this@MainActivity).addPendingAttendance(
+                                        employeeNumber.toString(),
+                                        action,
+                                        uuid,
+                                        photoFile.absolutePath
+                                    )
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        "Live punch failed — saved locally",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                    handler.postDelayed({ resetInput() }, 3000L)
                                 }
                             }
                         }
+                    } else {
+                        // Offline: store punch + photo
+                        DatabaseHelper(this@MainActivity).addPendingAttendance(
+                            employeeNumber.toString(),
+                            action,
+                            uuid,
+                            photoFile.absolutePath
+                        )
+                        runOnUiThread {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Offline — punch + photo saved locally",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            handler.postDelayed({ resetInput() }, 3000L)
+                        }
                     }
                 }
-            }
-        )
+            })
     }
 
 
@@ -297,7 +368,6 @@ class MainActivity : AppCompatActivity() {
                         Toast.makeText(this@MainActivity,
                             "Photo taken: ${photoFile.name}", Toast.LENGTH_SHORT).show()
                     }
-                    // TODO: upload `photoFile` or send its path to your backend
                 }
             })
     }
@@ -317,12 +387,17 @@ class MainActivity : AppCompatActivity() {
     private fun handleKeyPress(value: String) {
         when (currentState) {
             InputState.EMPLOYEE_ID -> handleEmployeeIdInput(value)
-            InputState.PIN        -> {
+            InputState.PIN -> {
+                if (value == "x" || value == "X") {
+                    resetInput() // 🔁 Return to employee ID
+                    return
+                }
                 pinManager.onKey(value)
                 updateDots(pinManager.length())
             }
         }
     }
+
     private fun handlePinInput(value: String) {
         // 1) Feed the keystroke to the manager:
         pinManager.onKey(value)
@@ -382,6 +457,7 @@ class MainActivity : AppCompatActivity() {
         ensurePinDots(3)           // back to 3 placeholders
         updateDots(0)
         promptText.text = "Please enter Employee ID"
+        currentEmployeeName =""
     }
 
     private fun startClock() {

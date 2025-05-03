@@ -28,8 +28,9 @@ import okhttp3.Response
 
 import java.io.File
 import java.io.IOException
-object ApiService {
-    private const val BASE_URL = "http://4.184.202.172:3012"
+object  ApiService {
+    private const val BASE_URL = "http://4.184.202.172:3612"
+
     fun recordAttendanceWithPhoto(
         context: Context,
         employeeNumber: Int,
@@ -56,12 +57,13 @@ object ApiService {
 
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
+                Log.e("ApiService", "recordAttendanceWithPhoto FAILURE for employee $employeeNumber, action=$action, deviceUUID=$deviceUUID", e)
                 Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(
-                        context,
-                        "Upload failed: ${e.message}",
-                        Toast.LENGTH_SHORT
-                    ).show()
+//                    Toast.makeText(
+//                        context,
+//                        "Upload failed: ${e.message}",
+//                        Toast.LENGTH_SHORT
+//                    ).show()
                     onResult(false, null)
                 }
             }
@@ -136,6 +138,7 @@ object ApiService {
                 } ?: run {
                     Toast.makeText(context, "Network error: ${err.message}", Toast.LENGTH_LONG).show()
                 }
+                Log.e("validateEmployee", "Network error", err)
                 onResult(false, null)
             }
         )
