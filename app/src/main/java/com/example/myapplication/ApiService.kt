@@ -6,12 +6,15 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.widget.Toast
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 
 // Volley — alias its Request so it doesn’t conflict
 import com.android.volley.Request as VolleyRequest
-import com.android.volley.VolleyError
 import com.android.volley.toolbox.JsonObjectRequest
 import com.android.volley.toolbox.Volley
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 // JSON
 import org.json.JSONObject
@@ -25,11 +28,20 @@ import okhttp3.OkHttpClient
 import okhttp3.Request            // <<-- OkHttp’s Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.Response
+import java.util.concurrent.TimeUnit
 
 import java.io.File
 import java.io.IOException
 object  ApiService {
-    private const val BASE_URL = "http://4.184.202.172:3612"
+    private const val TAG = "ApiService"
+    // share one OkHttpClient for both sync & async
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    public const val BASE_URL = "http://4.184.202.172:3012"
 
     fun recordAttendanceWithPhoto(
         context: Context,
@@ -39,25 +51,33 @@ object  ApiService {
         photoFile: File,
         onResult: (Boolean, List<String>?) -> Unit
     ) {
+        Log.d(
+            "ApiService",
+            "📸 Starting upload for employee=$employeeNumber, action=$action, file=${photoFile.absolutePath}"
+        )
         val client = OkHttpClient()
         val mediaType = "image/jpeg".toMediaTypeOrNull()
-        val fileBody  = photoFile.asRequestBody(mediaType)
+        val fileBody = photoFile.asRequestBody(mediaType)
 
         val multipartBody = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("action", action)
             .addFormDataPart("deviceUUID", deviceUUID)
-            .addFormDataPart("photos", photoFile.name, fileBody)
+            .addFormDataPart("photo", photoFile.name, fileBody)
             .build()
 
         val request = Request.Builder()
-            .url("$BASE_URL/api/employees/$employeeNumber/photos")
+            .url("$BASE_URL/api/$employeeNumber/photos")
             .post(multipartBody)
             .build()
 
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                Log.e("ApiService", "recordAttendanceWithPhoto FAILURE for employee $employeeNumber, action=$action, deviceUUID=$deviceUUID", e)
+                Log.e(
+                    "ApiService",
+                    "recordAttendanceWithPhoto FAILURE for employee $employeeNumber, action=$action, deviceUUID=$deviceUUID",
+                    e
+                )
                 Handler(Looper.getMainLooper()).post {
 //                    Toast.makeText(
 //                        context,
@@ -69,20 +89,21 @@ object  ApiService {
             }
 
             override fun onResponse(call: Call, resp: Response) {
+                Log.d("ApiService", "recordAttendanceWithPhoto HTTP ${resp.code}")
+                // Read body just once:
+                val bodyString = resp.body?.string() ?: ""
+                Log.v("ApiService", "Response body: $bodyString")
+
                 if (!resp.isSuccessful) {
+                    Log.w("ApiService", "Server error code=${resp.code}")
                     Handler(Looper.getMainLooper()).post {
-                        Toast.makeText(
-                            context,
-                            "Server error: ${resp.code}",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        Toast.makeText(context, "Server error: ${resp.code}", Toast.LENGTH_SHORT).show()
                         onResult(false, null)
                     }
                     return
                 }
 
                 // parse { success, message, urls: [...] }
-                val bodyString = resp.body?.string() ?: ""
                 val urls = mutableListOf<String>()
                 try {
                     val obj = JSONObject(bodyString)
@@ -92,17 +113,62 @@ object  ApiService {
                             urls.add(arr.getString(i))
                         }
                     }
+                    Log.d("ApiService", "Parsed URLs: $urls")
                 } catch (ex: Exception) {
-                    Log.e("ApiService", "JSON parse error", ex)
+                    Log.e("ApiService", "JSON parse error in photo upload", ex)
                 }
 
                 Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(context, "Photo uploaded!", Toast.LENGTH_SHORT).show()
+                    Log.i("ApiService", "Photo uploaded successfully")
                     onResult(true, urls)
                 }
             }
         })
     }
+    fun getLastTimeRecord(
+        context: Context,
+        employeeNumber: String,
+        deviceUUID: String,
+        callback: (Boolean, JSONObject?) -> Unit
+    ) {
+        val url = "$BASE_URL/api/attendance/last-record" // << uses the BASE_URL constant
+        val jsonBody = JSONObject().apply {
+            put("employeeNumber", employeeNumber)
+            put("deviceUUID", deviceUUID)
+        }
+
+        postJsonRequest(context, url, jsonBody) { success, response ->
+            if (success && response != null) {
+                val record = response.optJSONObject("record")
+                callback(true, record)
+            } else {
+                callback(false, null)
+            }
+        }
+    }
+
+    fun postJsonRequest(
+        context: Context,
+        url: String,
+        jsonBody: JSONObject,
+        onResult: (Boolean, JSONObject?) -> Unit
+    ) {
+        val request = JsonObjectRequest(
+            VolleyRequest.Method.POST,
+            url,
+            jsonBody,
+            { response ->
+                onResult(true, response)
+            },
+            { error ->
+                Log.e("ApiService", "POST $url failed: ${error.message}")
+                onResult(false, null)
+            }
+        )
+
+        Volley.newRequestQueue(context).add(request)
+    }
+
     fun validateEmployee(
         context: Context,
         employeeNumber: Int,
@@ -136,7 +202,8 @@ object  ApiService {
                     }
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 } ?: run {
-                    Toast.makeText(context, "Network error: ${err.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Network error: ${err.message}", Toast.LENGTH_LONG)
+                        .show()
                 }
                 Log.e("validateEmployee", "Network error", err)
                 onResult(false, null)
@@ -150,7 +217,7 @@ object  ApiService {
         employeeNumber: Int,
         action: String,
         deviceUUID: String,
-        onResult: (Boolean) -> Unit
+        onResult: (success: Boolean, errorJson: JSONObject?) -> Unit
     ) {
         val url = "$BASE_URL/api/attendance/record"
         val body = JSONObject().apply {
@@ -159,28 +226,44 @@ object  ApiService {
             put("deviceUUID", deviceUUID)
         }
 
+        Log.d("ApiService", "📤 Sending attendance → $body")
+
         val req = JsonObjectRequest(
-            VolleyRequest.Method.POST,       // ← use VolleyRequest
+            VolleyRequest.Method.POST,
             url,
             body,
             { resp ->
-                onResult(resp.optBoolean("success", false))
+                Log.d("ApiService", "✅ Response: $resp")
+                onResult(resp.optBoolean("success", false), null)
             },
             { err ->
-                err.networkResponse?.let { nr ->
+                // Try to parse a JSON error payload
+                val errorJson: JSONObject? = err.networkResponse?.let { nr ->
                     val bodyText = String(nr.data, Charsets.UTF_8)
-                    val msg = try {
-                        JSONObject(bodyText).optString("error", "Action failed")
+                    Log.e("ApiService", "❌ Server error: $bodyText")
+                    try {
+                        JSONObject(bodyText)
                     } catch (_: Exception) {
-                        "Attendance failed"
+                        null
                     }
+                }
+
+                // Show a toast based on server or network error
+                err.networkResponse?.let {
+                    val msg = errorJson?.optString("error", "Action failed")
+                        ?: "Action failed"
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 } ?: run {
-                    Toast.makeText(context, "Network error: ${err.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Network error: ${err.message}", Toast.LENGTH_LONG)
+                        .show()
                 }
-                onResult(false)
+
+                // Pass failure + parsed JSON (if any) back to caller
+                onResult(false, errorJson)
             }
-        ).apply { setShouldCache(false) }
+        ).apply {
+            setShouldCache(false)
+        }
 
         Volley.newRequestQueue(context).add(req)
     }
@@ -210,7 +293,8 @@ object  ApiService {
                     }
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 } ?: run {
-                    Toast.makeText(context, "Network error: ${err.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Network error: ${err.message}", Toast.LENGTH_LONG)
+                        .show()
                 }
                 onResult(false)
             }
@@ -240,10 +324,10 @@ object  ApiService {
             url,
             body,
             { resp ->
-                val ok       = resp.optBoolean("success", false)
+                val ok = resp.optBoolean("success", false)
                 val deviceId = resp.optInt("deviceId", -1)
-                val company  = resp.optJSONObject("company")
-                val outlet   = resp.optJSONObject("outlet")
+                val company = resp.optJSONObject("company")
+                val outlet = resp.optJSONObject("outlet")
                 onResult(ok, deviceId, company, outlet)
             },
             { err ->
@@ -256,7 +340,8 @@ object  ApiService {
                     }
                     Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
                 } ?: run {
-                    Toast.makeText(context, "Network error: ${err.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Network error: ${err.message}", Toast.LENGTH_LONG)
+                        .show()
                 }
                 onResult(false, -1, null, null)
             }
@@ -265,25 +350,62 @@ object  ApiService {
         Volley.newRequestQueue(context).add(req)
     }
 
-    fun getCompanyInfo(
+    // Somewhere in ApiService.kt:
+    suspend fun recordAttendanceAsync(
         context: Context,
-        companyId: Int,
-        onResult: (Boolean, JSONObject?) -> Unit
-    ) {
-        val url = "$BASE_URL/api/company/$companyId"
-
-        val req = JsonObjectRequest(
-            VolleyRequest.Method.GET,        // ← use VolleyRequest
-            url,
-            null,
-            { resp ->
-                onResult(resp.optBoolean("success", false), resp.optJSONObject("company"))
-            },
-            { err ->
-                Toast.makeText(context, "Network error: ${err.message}", Toast.LENGTH_LONG).show()
-                onResult(false, null)
-            }
-        )
-        Volley.newRequestQueue(context).add(req)
+        empId: Int,
+        action: String,
+        uuid: String
+    ): Boolean = suspendCoroutine { cont ->
+        recordAttendance(context, empId, action, uuid) { success, _ ->
+            cont.resume(success)
+        }
     }
+
+    /**
+     * Upload a photo to the employee-photos endpoint,
+     * so that employees.js actually updates the img* column.
+     */
+    suspend fun recordAttendanceWithPhotoAsync(
+        context: Context,
+        employeeNumber: Int,
+        action: String,
+        deviceUUID: String,
+        photoFile: File
+    ): Boolean = withContext(Dispatchers.IO) {
+        val url = "$BASE_URL/api/$employeeNumber/photos"
+        Log.d(TAG, "📸 Starting upload for employee=$employeeNumber, action=$action, file=${photoFile.path}")
+
+        // build multipart
+        val requestBody = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("action", action)
+            .addFormDataPart("deviceUUID", deviceUUID)
+            .addFormDataPart(
+                "photo", photoFile.name,
+                photoFile.asRequestBody("image/jpeg".toMediaTypeOrNull())
+            )
+            .build()
+
+        val request = Request.Builder()
+            .url(url)
+            .post(requestBody)
+            .build()
+
+        try {
+            client.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.e(TAG, "recordAttendanceWithPhoto FAILURE: HTTP ${resp.code}")
+                    return@withContext false
+                }
+                val respBody = resp.body?.string().orEmpty()
+                Log.d(TAG, "✅ Photo upload succeeded: $respBody")
+                return@withContext true
+            }
+        } catch (e: IOException) {
+            Log.e(TAG, "recordAttendanceWithPhoto FAILURE for employee $employeeNumber", e)
+            return@withContext false
+        }
+    }
+
 }

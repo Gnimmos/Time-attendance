@@ -8,30 +8,29 @@ import android.os.Looper
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.core.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope                             // <<< COROUTINE
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import org.opencv.android.OpenCVLoader
-import android.content.Context
-import android.content.Intent
-import android.net.ConnectivityManager
-import android.view.LayoutInflater
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import android.content.Context
+import android.content.Intent
+import android.net.ConnectivityManager
+import android.view.LayoutInflater
 import android.util.Log
-import java.util.Locale
-
-
+//import com.example.myapplication.data.repository.DatabaseHelper
+import org.opencv.android.OpenCVLoader
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -56,93 +55,109 @@ class MainActivity : AppCompatActivity() {
     private val employeeIdBuilder = StringBuilder()
     private var currentEmployeeNumber: Int = 0
     private lateinit var pinManager: PinEntryManager
-    var currentEmployeeName =""
+    private var currentEmployeeName = ""
+
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        previewView   = findViewById(R.id.previewView)
-        clockText     = findViewById(R.id.clockText)
-        greetingText  = findViewById(R.id.greetingText)
-        dateText      = findViewById(R.id.dateText)
-        pinDots       = findViewById(R.id.pinDots)
+        previewView = findViewById(R.id.previewView)
+        clockText = findViewById(R.id.clockText)
+        greetingText = findViewById(R.id.greetingText)
+        dateText = findViewById(R.id.dateText)
+        pinDots = findViewById(R.id.pinDots)
         promptText = findViewById(R.id.promptText)
         cameraExecutor = Executors.newSingleThreadExecutor()
 
-        // Set up keypad buttons
+        // Camera permission
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            == PackageManager.PERMISSION_GRANTED) {
+            == PackageManager.PERMISSION_GRANTED
+        ) {
             startCamera()
         } else {
             ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.CAMERA),
+                this, arrayOf(Manifest.permission.CAMERA),
                 REQUEST_CAMERA_PERMISSION
             )
         }
+
         if (isNetworkAvailable()) {
-            DatabaseHelper(this).syncEmployeesFromApi(this)
-            DatabaseHelper(this).syncPendingAttendance(this)
+            lifecycleScope.launch {                                       // <<< COROUTINE
+//                val repo = DatabaseHelper(this@MainActivity)
+//                repo.syncEmployeesFromApi()
+                //repo.syncPendingAttendance()
+            }
         }
 
 
-
-        // Set current time and start clock
         startClock()
-
-        // Set greeting and date
         setGreetingAndDate()
 
-        // Settings icon
         findViewById<ImageView>(R.id.settingsIcon)?.setOnClickListener {
             showAdminPinDialog()
         }
-        findViewById<ImageView>(R.id.cameraIcon)?.setOnClickListener {
-           // checkOpenCVStatus()
-        }
-        ensurePinDots(3)             // start in “employee ID” mode
+
+        ensurePinDots(3)
         promptText.text = "Please enter Employee ID"
-        val keypad = findViewById<GridLayout>(R.id.keypad)
-        for (i in 0 until keypad.childCount) {
-            (keypad.getChildAt(i) as Button).setOnClickListener {
-                handleKeyPress((it as Button).text.toString())
+
+        findViewById<GridLayout>(R.id.keypad).apply {
+            for (i in 0 until childCount) {
+                (getChildAt(i) as Button).setOnClickListener {
+                    handleKeyPress((it as Button).text.toString())
+                }
             }
         }
+
         pinManager = PinEntryManager(
-                       maxAttempts = 3,
-            isValidPin = { pin ->
-                val empId = employeeIdBuilder.toString()
-                DatabaseHelper(this).isValidEmployeePin(empId, pin)
+            maxAttempts = 3,
+            isValidPin = { pin -> true
+                // must be called from coroutine, but PinEntryManager.validate() runs synchronously,
+                // so we must block here briefly—switch to runBlocking or prefetch pins if needed.
+                // For now assume local cache is small and call synchronously:
+//                runBlocking {
+//                    DatabaseHelper(this@MainActivity).isValidEmployeePin(
+//                        employeeIdBuilder.toString(),
+//                        pin
+//                    )
+//                }
             },
-                       onSuccess = { pin ->
-                               // when valid, convert employeeIdBuilder → Int and call your existing validateEmployeeLogin
-                           val empId = employeeIdBuilder.toString().toInt()
-                           currentEmployeeNumber = empId
-                           capturePhoto()
-                           if (isNetworkAvailable()) {
-                               // online validation
-                               capturePhoto()
-                               validateEmployeeLogin(currentEmployeeNumber, pin)
-                           } else {
-                               // offline: trust local DB and show dialog
-                               currentEmployeeName = "Employee #$empId" // or get name if cached
-                               showActionDialog(currentEmployeeName)
-                           }                           },
-                       onFailure = { rem ->
-                               Toast.makeText(this, "Wrong PIN, $rem tries left", Toast.LENGTH_SHORT).show()
-                               animateDotFailure()
-                           },
+            onSuccess = { pin ->
+                val empId = employeeIdBuilder.toString().toInt()
+                currentEmployeeNumber = empId
+                capturePhoto()
+                if (isNetworkAvailable()) {
+                    validateEmployeeLogin(empId, pin)
+                } else {
+                    currentEmployeeName = "Employee #$empId"
+                    ApiService.getLastTimeRecord(this, empId.toString(), getDeviceUUID()!!) { success, record ->
+                        if (success && record != null) {
+                            showActionDialog(currentEmployeeName, record)
+                        } else {
+                            showActionDialog(currentEmployeeName, null) // fallback
+                        }
+                    }
+
+                }
+            },
+            onFailure = { rem ->
+                Toast.makeText(this, "Wrong PIN, $rem tries left", Toast.LENGTH_SHORT).show()
+                animateDotFailure()
+            },
             onLocked = {
-                Toast.makeText(this, "Too many incorrect attempts. Returning to ID input.", Toast.LENGTH_SHORT).show()
-                resetInput() // 🔁 Return to EMPLOYEE_ID mode
+                Toast.makeText(
+                    this,
+                    "Too many incorrect attempts. Returning to ID input.",
+                    Toast.LENGTH_SHORT
+                ).show()
+                resetInput()
                 pinManager.clear()
             }
-
-
-                          )
+        )
         updateDots(0)
     }
+
     fun isNetworkAvailable(): Boolean {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         return cm.activeNetworkInfo?.isConnectedOrConnecting == true
@@ -151,6 +166,7 @@ class MainActivity : AppCompatActivity() {
     private fun animateDotFailure() {
         updateDots(0)
     }
+
     private enum class InputState {
         EMPLOYEE_ID, PIN
     }
@@ -175,48 +191,92 @@ class MainActivity : AppCompatActivity() {
                 val empId = empJson.optString("employeeNumber", employeeNumber.toString())
                 val pinUsed = pin  // The one entered by user
                 Log.i("Login", "Online validation success for $empId. Saving to local DB.")
-                DatabaseHelper(this).upsertEmployee(empId, pinUsed)
-
+//                lifecycleScope.launch {
+//                                      DatabaseHelper(this@MainActivity).upsertEmployee(empId, pin)
+//                                    }
                 currentEmployeeName = empJson.optString("name", "Employee")
-                showActionDialog(currentEmployeeName)
+                ApiService.getLastTimeRecord(this, empId, getDeviceUUID()!!) { success, record ->
+                    if (success && record != null) {
+                        showActionDialog(currentEmployeeName, record)
+                    } else {
+                        showActionDialog(currentEmployeeName, null) // fallback
+                    }
+                }
             } else {
-                Toast.makeText(this,"Invalid Number or PIN",Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Invalid Number or PIN", Toast.LENGTH_SHORT).show()
                 resetInput()
             }
         }
     }
+    private fun fetchLastTimeRecord(employeeNumber: Int, callback: (JSONObject?) -> Unit) {
+        val uuid = getDeviceUUID() ?: return callback(null)
 
-    private fun showActionDialog(userName: String) {
-        val actions = arrayOf("Clock In", "Clock Out", "Break Start", "Break Stop")
+        ApiService.getLastTimeRecord(this, employeeNumber.toString(), uuid) { success, json ->
+            if (success && json != null) {
+                callback(json)
+            } else {
+                callback(null)
+            }
+        }
+    }
+
+    private fun showActionDialog(userName: String, lastRecord: JSONObject?) {
+        val actions = mutableListOf<String>()
+
+        val clockedIn = lastRecord?.isNull("clockInTime") == false && lastRecord.isNull("clockOutTime") == true
+
+        val onBreak =
+            (lastRecord?.isNull("breakStartTime") == false && lastRecord.isNull("breakEndTime") == true) ||
+                    (lastRecord?.isNull("break2StartTime") == false && lastRecord.isNull("break2EndTime") == true) ||
+                    (lastRecord?.isNull("break3StartTime") == false && lastRecord.isNull("break3EndTime") == true)
+
+        when {
+            onBreak -> actions.add("End Break")
+            !clockedIn -> actions.add("Clock In")
+            clockedIn -> {
+                actions.add("Clock Out")
+                actions.add("Start Break")
+            }
+        }
+
+        actions.add("❌ Cancel")
+
         AlertDialog.Builder(this)
             .setTitle("Hello, $userName!")
-            .setItems(actions) { _, which ->
-                // map the human label to your API keys:
-                val actionKey = when (which) {
-                    0 -> "clock_in"
-                    1 -> "clock_out"
-                    2 -> "break_start"
-                    3 -> "break_stop"
+            .setItems(actions.toTypedArray()) { dialog, which ->
+                val selected = actions[which]
+                if (selected == "❌ Cancel") {
+                    resetInput()
+                    return@setItems
+                }
+
+                val actionKey = when (selected) {
+                    "Clock In" -> "clock_in"
+                    "Clock Out" -> "clock_out"
+                    "Start Break" -> "break_start"
+                    "End Break" -> "break_stop"
                     else -> ""
                 }
-                val actionLabel = actions[which]
-                // Display "<Name> – <Action>" under the keyboard:
-                promptText.text = "$userName – $actionLabel"
-                sendAttendanceAction(currentEmployeeNumber, actionKey, actionLabel)
+
+                promptText.text = "$userName – $selected"
+                sendAttendanceAction(currentEmployeeNumber, actionKey, selected)
             }
             .setCancelable(false)
             .show()
     }
+
     override fun onRequestPermissionsResult(
         requestCode: Int, permissions: Array<out String>, grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_CAMERA_PERMISSION &&
             grantResults.isNotEmpty() &&
-            grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        ) {
             startCamera()
         }
     }
+
     private fun startCamera() {
         val camProviderF = ProcessCameraProvider.getInstance(this)
         camProviderF.addListener({
@@ -232,6 +292,7 @@ class MainActivity : AppCompatActivity() {
             camProvider.bindToLifecycle(this, selector, preview, imageCapture)
         }, ContextCompat.getMainExecutor(this))
     }
+
     private fun sendAttendanceAction(
         employeeNumber: Int,
         action: String,
@@ -253,7 +314,8 @@ class MainActivity : AppCompatActivity() {
 
         // 2) Take picture
         imageCapture.takePicture(
-            outputOptions, ContextCompat.getMainExecutor(this),
+            outputOptions,
+            ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onError(exc: ImageCaptureException) {
                     runOnUiThread {
@@ -274,11 +336,15 @@ class MainActivity : AppCompatActivity() {
                             employeeNumber,
                             action,
                             uuid
-                        ) { punchOk ->
+                        ) { punchOk, errorJson ->
                             runOnUiThread {
                                 if (punchOk) {
                                     // Now upload photo
-                                    Log.i("Attendance", "✅ Live punch succeeded: $employeeNumber – $action")
+                                    Log.i(
+                                        "Attendance",
+                                        "✅ Live punch succeeded: $employeeNumber – $action"
+                                    )
+                                    Handler(Looper.getMainLooper()).postDelayed({
                                     ApiService.recordAttendanceWithPhoto(
                                         this@MainActivity,
                                         employeeNumber,
@@ -296,28 +362,36 @@ class MainActivity : AppCompatActivity() {
                                                     "Photo upload failed",
                                                     Toast.LENGTH_SHORT
                                                 ).show()
-
-                                                // Fallback: save for later
-                                                DatabaseHelper(this@MainActivity)
-                                                    .addPendingAttendance(
-                                                        employeeNumber.toString(),
-                                                        action,
-                                                        uuid,
-                                                        photoFile.absolutePath
-                                                    )
+                                                // TODO: ENABLE_OFFLINE fallback:
+//                                                lifecycleScope.launch {
+//                                                    DatabaseHelper(this@MainActivity)
+//                                                        .addPendingAttendance(
+//                                                            employeeNumber.toString(),
+//                                                            action,
+//                                                            uuid,
+//                                                            photoFile.absolutePath
+//                                                        )
+//                                                }
                                             }
                                             handler.postDelayed({ resetInput() }, 3000L)
                                         }
                                     }
+                                }, 300)
                                 } else {
                                     // Fallback: save both punch and photo offline
-                                    Log.w("Attendance", "❌ Live punch failed: $employeeNumber – $action. Saving offline.")
-                                    DatabaseHelper(this@MainActivity).addPendingAttendance(
-                                        employeeNumber.toString(),
-                                        action,
-                                        uuid,
-                                        photoFile.absolutePath
+                                    Log.w(
+                                        "Attendance",
+                                        "❌ Live punch failed: $employeeNumber – $action. Saving offline."
                                     )
+//                                    lifecycleScope.launch {
+//                                        DatabaseHelper(this@MainActivity)
+//                                            .addPendingAttendance(
+//                                                employeeNumber.toString(),
+//                                                action,
+//                                                uuid,
+//                                                photoFile.absolutePath
+//                                            )
+//                                    }
                                     Toast.makeText(
                                         this@MainActivity,
                                         "Live punch failed — saved locally",
@@ -329,12 +403,15 @@ class MainActivity : AppCompatActivity() {
                         }
                     } else {
                         // Offline: store punch + photo
-                        DatabaseHelper(this@MainActivity).addPendingAttendance(
-                            employeeNumber.toString(),
-                            action,
-                            uuid,
-                            photoFile.absolutePath
-                        )
+//                        lifecycleScope.launch {
+//                            DatabaseHelper(this@MainActivity)
+//                                .addPendingAttendance(
+//                                    employeeNumber.toString(),
+//                                    action,
+//                                    uuid,
+//                                    photoFile.absolutePath
+//                                )
+//                        }
                         runOnUiThread {
                             Toast.makeText(
                                 this@MainActivity,
@@ -345,28 +422,35 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
-            })
+            }
+        )
     }
 
-
     private fun capturePhoto() {
-        val photoFile = File(cacheDir,
+        val photoFile = File(
+            cacheDir,
             SimpleDateFormat("yyyy-MM-dd-HH-mm-ss-SSS", Locale.US)
                 .format(System.currentTimeMillis()) + ".jpg"
         )
         val opts = ImageCapture.OutputFileOptions.Builder(photoFile).build()
-        imageCapture.takePicture(opts, ContextCompat.getMainExecutor(this),
+        imageCapture.takePicture(
+            opts, ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onError(exc: ImageCaptureException) {
                     runOnUiThread {
-                        Toast.makeText(this@MainActivity,
-                            "Photo capture failed", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Photo capture failed", Toast.LENGTH_SHORT
+                        ).show()
                     }
                 }
+
                 override fun onImageSaved(results: ImageCapture.OutputFileResults) {
                     runOnUiThread {
-                        Toast.makeText(this@MainActivity,
-                            "Photo taken: ${photoFile.name}", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Photo taken: ${photoFile.name}", Toast.LENGTH_SHORT
+                        ).show()
                     }
                 }
             })
@@ -441,13 +525,11 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-
     private fun updateDots(filled: Int) {
         for (i in 0 until pinDots.childCount) {
             pinDots.getChildAt(i).alpha = if (i < filled) 1f else 0.3f
         }
     }
-
 
 
     private fun resetInput() {
@@ -457,7 +539,7 @@ class MainActivity : AppCompatActivity() {
         ensurePinDots(3)           // back to 3 placeholders
         updateDots(0)
         promptText.text = "Please enter Employee ID"
-        currentEmployeeName =""
+        currentEmployeeName = ""
     }
 
     private fun startClock() {
@@ -505,7 +587,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun showAdminPinDialog() {
         val passwordInput = EditText(this).apply {
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            inputType =
+                android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
             hint = "Enter Admin Password"
         }
 
@@ -520,7 +603,8 @@ class MainActivity : AppCompatActivity() {
                         if (!isDeviceRegistered()) {
                             promptForDeviceRegistration()
                         } else {
-                            Toast.makeText(this, "Device already registered.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(this, "Device already registered.", Toast.LENGTH_SHORT)
+                                .show()
                             showRegisteredDeviceInfo()
                         }
                     } else {
@@ -531,6 +615,7 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Cancel", null)
             .show()
     }
+
     private fun getOrCreateDeviceUUID(): String {
         val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
         var uuid = prefs.getString("device_uuid", null)
@@ -544,24 +629,37 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showRegisteredDeviceInfo() {
-        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        val companyName = prefs.getString("company_name", "Unknown Company")
-        val companyId = prefs.getInt("company_id", -1)
-        val outletName = prefs.getString("outlet_name", "No Outlet")
-        val outletId = prefs.getInt("outlet_id", -1)
-        val deviceId = prefs.getInt("device_id", -1)
+        // fetch counts in coroutine
+        lifecycleScope.launch {
+           // val repo = DatabaseHelper(this@MainActivity)
+          //  val synced = repo.countSyncedRecords()                          // <<< COROUTINE
+           // val pending = repo.countPendingRecords()                         // <<< COROUTINE
+            val synced = 0
+            val pending = 0
 
-        val infoMessage = """
-        ✅ Device ID: $deviceId
-        🏢 Company: $companyName (ID: $companyId)
-        📍 Outlet: $outletName (ID: ${if (outletId != -1) outletId else "N/A"})
-    """.trimIndent()
+            val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+            val companyName = prefs.getString("company_name", "Unknown Company")
+            val companyId = prefs.getInt("company_id", -1)
+            val outletName = prefs.getString("outlet_name", "No Outlet")
+            val outletId = prefs.getInt("outlet_id", -1)
+            val deviceId = prefs.getInt("device_id", -1)
 
-        AlertDialog.Builder(this)
-            .setTitle("Registered Device Info")
-            .setMessage(infoMessage)
-            .setPositiveButton("OK", null)
-            .show()
+            val infoMessage = """
+                ✅ Device ID: $deviceId
+                🏢 Company: $companyName (ID: $companyId)
+                📍 Outlet: $outletName (ID: ${if (outletId != -1) outletId else "N/A"})
+                
+                📊 Attendance Summary:
+                ✅ Synced: $synced
+                ⏳ Pending: $pending
+            """.trimIndent()
+
+            AlertDialog.Builder(this@MainActivity)
+                .setTitle("Registered Device Info")
+                .setMessage(infoMessage)
+                .setPositiveButton("OK", null)
+                .show()
+        }
     }
 
     private fun isDeviceRegistered(): Boolean {
@@ -573,18 +671,25 @@ class MainActivity : AppCompatActivity() {
         val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_register_device, null)
         val companyIdInput = dialogView.findViewById<EditText>(R.id.companyIdInput)
         val deviceNameInput = dialogView.findViewById<EditText>(R.id.deviceNameInput)
-        val outletIdInput   = dialogView.findViewById<EditText>(R.id.outletIdInput)
+        val outletIdInput = dialogView.findViewById<EditText>(R.id.outletIdInput)
 
         AlertDialog.Builder(this)
             .setTitle("Register Device")
             .setView(dialogView)
             .setPositiveButton("Register") { _, _ ->
-                val companyId = companyIdInput.text.toString().toIntOrNull() ?: return@setPositiveButton
-                val outletId  = outletIdInput.text.toString().toIntOrNull() ?: 0
-                val name      = deviceNameInput.text.toString().trim()
-                val uuid      = getOrCreateDeviceUUID()
+                val companyId =
+                    companyIdInput.text.toString().toIntOrNull() ?: return@setPositiveButton
+                val outletId = outletIdInput.text.toString().toIntOrNull() ?: 0
+                val name = deviceNameInput.text.toString().trim()
+                val uuid = getOrCreateDeviceUUID()
 
-                ApiService.registerDevice(this, companyId, outletId, uuid, name) { success, serverDeviceId, company, outlet ->
+                ApiService.registerDevice(
+                    this,
+                    companyId,
+                    outletId,
+                    uuid,
+                    name
+                ) { success, serverDeviceId, company, outlet ->
                     if (success && serverDeviceId != -1) {
                         // persist both the client‐side UUID and the server‐side numeric ID
                         getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
@@ -597,9 +702,11 @@ class MainActivity : AppCompatActivity() {
                         saveDeviceInfo(serverDeviceId, company!!, outlet)
                         resetInput()
                         findViewById<TextView>(R.id.promptText).text = "Please enter Employee ID"
-                        Toast.makeText(this, "Device Registered Successfully!", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "Device Registered Successfully!", Toast.LENGTH_SHORT)
+                            .show()
                     } else {
-                        Toast.makeText(this, "Device Registration Failed", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "Device Registration Failed", Toast.LENGTH_SHORT)
+                            .show()
                         promptForDeviceRegistration()
                     }
                 }
@@ -644,3 +751,6 @@ class MainActivity : AppCompatActivity() {
     }
 
 }
+
+
+

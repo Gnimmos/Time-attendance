@@ -11,6 +11,7 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
+
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
@@ -19,8 +20,10 @@ dependencyResolutionManagement {
     }
 }
 
+
 rootProject.name = "My Application"
 include(":app")
 include(":opencv")
 project(":opencv").projectDir = File("C:/OpenCV-android-sdk/sdk")
 include(":sdk")
+
