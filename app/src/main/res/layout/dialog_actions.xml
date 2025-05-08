@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:fillViewport="true"
+    android:background="@drawable/bg_dialog_rounded">
+
+    <RelativeLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="10dp">
+
+        <!-- Cancel X in top-right -->
+        <TextView
+            android:id="@+id/cancelBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="❌"
+            android:textSize="15sp"
+            android:textColor="#000000"
+            android:clickable="true"
+            android:focusable="true"
+            android:layout_alignParentEnd="true"
+            android:layout_alignParentTop="true" />
+
+        <!-- Content container -->
+        <LinearLayout
+            android:id="@+id/contentContainer"
+            android:layout_below="@id/cancelBtn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="16dp">
+
+            <TextView
+                android:id="@+id/dialogTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Hello!"
+                android:textSize="24sp"
+                android:textStyle="bold"
+                android:gravity="center"
+                android:layout_marginBottom="24dp" />
+
+            <!-- Buttons -->
+            <Button
+                android:id="@+id/clockInBtn"
+                android:layout_width="match_parent"
+                android:layout_height="80dp"
+                android:text="Clock In"
+                android:textSize="22sp"
+                android:layout_marginBottom="16dp"
+                android:backgroundTint="#87CBC0"
+                android:textColor="#FFFFFF" />
+
+
+            <Button
+                android:id="@+id/clockOutBtn"
+                android:layout_width="match_parent"
+                android:layout_height="80dp"
+                android:text="Clock Out"
+                android:textSize="22sp"
+                android:layout_marginBottom="16dp"
+                android:backgroundTint="#A8A9D4"
+                android:textColor="#FFFFFF" />
+
+            <Button
+                android:id="@+id/startBreakBtn"
+                android:layout_width="match_parent"
+                android:layout_height="80dp"
+                android:text="Start Break"
+                android:textSize="22sp"
+                android:layout_marginBottom="16dp"
+                android:backgroundTint="#87CBC0"
+                android:textColor="#FFFFFF" />
+
+            <Button
+                android:id="@+id/endBreakBtn"
+                android:layout_width="match_parent"
+                android:layout_height="80dp"
+                android:text="End Break"
+                android:textSize="22sp"
+                android:layout_marginBottom="16dp"
+                android:backgroundTint="#A8A9D4"
+                android:textColor="#FFFFFF" />
+        </LinearLayout>
+    </RelativeLayout>
+</ScrollView>

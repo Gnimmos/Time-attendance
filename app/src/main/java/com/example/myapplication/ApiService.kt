@@ -212,6 +212,35 @@ object  ApiService {
         Volley.newRequestQueue(context).add(req)
     }
 
+    fun fetchEmployeeName(
+        context: Context,
+        employeeNumber: Int,
+        deviceUUID: String,
+        onResult: (Boolean, String?) -> Unit
+    ) {
+        val url = "$BASE_URL/api/employee/name"
+        val body = JSONObject().apply {
+            put("employeeNumber", employeeNumber)
+            put("deviceUUID", deviceUUID)
+        }
+
+        val req = JsonObjectRequest(
+            VolleyRequest.Method.POST,
+            url,
+            body,
+            { resp ->
+                val name = resp.optString("name", null)
+                onResult(resp.optBoolean("success", false) && name != null, name)
+            },
+            { err ->
+                Log.e("ApiService", "Failed to fetch employee name", err)
+                onResult(false, null)
+            }
+        )
+
+        Volley.newRequestQueue(context).add(req)
+    }
+
     fun recordAttendance(
         context: Context,
         employeeNumber: Int,
@@ -407,5 +436,36 @@ object  ApiService {
             return@withContext false
         }
     }
+    fun checkDevicePinRequired(
+        context: Context,
+        deviceUUID: String,
+        onResult: (Boolean?, String?) -> Unit
+    ) {
+        val url = "$BASE_URL/api/device/pin-required"
+        val body = JSONObject().apply { put("deviceUUID", deviceUUID) }
+
+        val request = JsonObjectRequest(
+            VolleyRequest.Method.POST,
+            url,
+            body,
+            { response ->
+                val success = response.optBoolean("success", false)
+                Log.d("ApiService", "pin-required → $response")
+
+                if (success) {
+                    val required = response.optBoolean("pinRequired", true)
+                    onResult(required, null)
+                } else {
+                    onResult(null, "API error")
+                }
+            },
+            { error ->
+                Log.e("ApiService", "checkDevicePinRequired failed: ${error.message}")
+                onResult(null, "Network error")
+            }
+        )
+        Volley.newRequestQueue(context).add(request)
+    }
+
 
 }

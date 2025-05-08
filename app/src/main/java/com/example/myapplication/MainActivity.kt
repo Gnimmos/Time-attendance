@@ -29,6 +29,7 @@ import android.content.Intent
 import android.net.ConnectivityManager
 import android.view.LayoutInflater
 import android.util.Log
+import android.view.View
 //import com.example.myapplication.data.repository.DatabaseHelper
 import org.opencv.android.OpenCVLoader
 
@@ -184,22 +185,25 @@ class MainActivity : AppCompatActivity() {
             resetInput()
             return
         }
+
         val uuid = getDeviceUUID()!!
+
         ApiService.validateEmployee(this, employeeNumber, pin.toInt(), uuid) { success, empJson ->
             if (success && empJson != null) {
                 Log.d("Login", "Server returned: ${empJson.toString(2)}")
+
                 val empId = empJson.optString("employeeNumber", employeeNumber.toString())
-                val pinUsed = pin  // The one entered by user
-                Log.i("Login", "Online validation success for $empId. Saving to local DB.")
-//                lifecycleScope.launch {
-//                                      DatabaseHelper(this@MainActivity).upsertEmployee(empId, pin)
-//                                    }
+                currentEmployeeNumber = empId.toIntOrNull() ?: employeeNumber
+
                 currentEmployeeName = empJson.optString("name", "Employee")
-                ApiService.getLastTimeRecord(this, empId, getDeviceUUID()!!) { success, record ->
+
+                Log.i("Login", "Online validation success for $empId ($currentEmployeeName).")
+
+                ApiService.getLastTimeRecord(this, empId, uuid) { success, record ->
                     if (success && record != null) {
                         showActionDialog(currentEmployeeName, record)
                     } else {
-                        showActionDialog(currentEmployeeName, null) // fallback
+                        showActionDialog(currentEmployeeName, null)
                     }
                 }
             } else {
@@ -208,6 +212,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
     private fun fetchLastTimeRecord(employeeNumber: Int, callback: (JSONObject?) -> Unit) {
         val uuid = getDeviceUUID() ?: return callback(null)
 
@@ -219,50 +224,98 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
-
     private fun showActionDialog(userName: String, lastRecord: JSONObject?) {
-        val actions = mutableListOf<String>()
+        val view = LayoutInflater.from(this).inflate(R.layout.dialog_actions, null).apply {
+            setPadding(16, 16, 16, 16)
+        }
 
-        val clockedIn = lastRecord?.isNull("clockInTime") == false && lastRecord.isNull("clockOutTime") == true
+        val dialog = AlertDialog.Builder(this)
+            .setView(view)
+            .setCancelable(false)
+            .create()
 
-        val onBreak =
-            (lastRecord?.isNull("breakStartTime") == false && lastRecord.isNull("breakEndTime") == true) ||
-                    (lastRecord?.isNull("break2StartTime") == false && lastRecord.isNull("break2EndTime") == true) ||
-                    (lastRecord?.isNull("break3StartTime") == false && lastRecord.isNull("break3EndTime") == true)
+        dialog.window?.setBackgroundDrawableResource(R.drawable.bg_dialog_rounded)
 
-        when {
-            onBreak -> actions.add("End Break")
-            !clockedIn -> actions.add("Clock In")
-            clockedIn -> {
-                actions.add("Clock Out")
-                actions.add("Start Break")
+        // Initial placeholder greeting
+        val titleView = view.findViewById<TextView>(R.id.dialogTitle)
+        titleView.text = "Hello $currentEmployeeName, #$currentEmployeeNumber"
+
+        // ✅ Attempt to fetch correct name (if placeholder or empty)
+        if (currentEmployeeName == "Employee" || currentEmployeeName.contains("#")) {
+            ApiService.fetchEmployeeName(this, currentEmployeeNumber, getDeviceUUID()!!) { ok, realName ->
+                if (ok && realName != null) {
+                    currentEmployeeName = realName
+                    titleView.text = "Hello $currentEmployeeName, #$currentEmployeeNumber"
+                }
             }
         }
 
-        actions.add("❌ Cancel")
+        val clockedIn = lastRecord?.isNull("clockInTime") == false && lastRecord.isNull("clockOutTime") == true
+        val onBreak = (lastRecord?.isNull("breakStartTime") == false && lastRecord.isNull("breakEndTime") == true) ||
+                (lastRecord?.isNull("break2StartTime") == false && lastRecord.isNull("break2EndTime") == true) ||
+                (lastRecord?.isNull("break3StartTime") == false && lastRecord.isNull("break3EndTime") == true)
 
-        AlertDialog.Builder(this)
-            .setTitle("Hello, $userName!")
-            .setItems(actions.toTypedArray()) { dialog, which ->
-                val selected = actions[which]
-                if (selected == "❌ Cancel") {
-                    resetInput()
-                    return@setItems
-                }
-
-                val actionKey = when (selected) {
-                    "Clock In" -> "clock_in"
-                    "Clock Out" -> "clock_out"
-                    "Start Break" -> "break_start"
-                    "End Break" -> "break_stop"
-                    else -> ""
-                }
-
-                promptText.text = "$userName – $selected"
-                sendAttendanceAction(currentEmployeeNumber, actionKey, selected)
+        view.findViewById<Button>(R.id.clockInBtn).apply {
+            visibility = if (!clockedIn) View.VISIBLE else View.GONE
+            setOnClickListener {
+                handleAction("Clock In", "clock_in", currentEmployeeName, dialog)
             }
+        }
+
+        view.findViewById<Button>(R.id.clockOutBtn).apply {
+            visibility = if (clockedIn) View.VISIBLE else View.GONE
+            setOnClickListener {
+                handleAction("Clock Out", "clock_out", currentEmployeeName, dialog)
+            }
+        }
+
+        view.findViewById<Button>(R.id.startBreakBtn).apply {
+            visibility = if (clockedIn && !onBreak) View.VISIBLE else View.GONE
+            setOnClickListener {
+                handleAction("Start Break", "break_start", currentEmployeeName, dialog)
+            }
+        }
+
+        view.findViewById<Button>(R.id.endBreakBtn).apply {
+            visibility = if (onBreak) View.VISIBLE else View.GONE
+            setOnClickListener {
+                handleAction("End Break", "break_stop", currentEmployeeName, dialog)
+            }
+        }
+
+        view.findViewById<TextView>(R.id.cancelBtn).setOnClickListener {
+            dialog.dismiss()
+            resetInput()
+        }
+
+        dialog.show()
+    }
+
+
+
+    private fun handleAction(label: String, actionKey: String, userName: String, dialog: AlertDialog) {
+        promptText.text = "$userName – $label"
+        sendAttendanceAction(currentEmployeeNumber, actionKey, label)
+        dialog.dismiss()
+        showTemporaryPopup("$userName, #$currentEmployeeNumber $label")
+    }
+
+    private fun showTemporaryPopup(message: String) {
+        val view = LayoutInflater.from(this).inflate(R.layout.popup_message, null)
+        view.findViewById<TextView>(R.id.popupMessage).text = message
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(view)
             .setCancelable(false)
-            .show()
+            .create()
+
+        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent) // Keep your custom bg only
+
+        dialog.show()
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            dialog.dismiss()
+        }, 3000)
     }
 
     override fun onRequestPermissionsResult(
@@ -499,7 +552,7 @@ class MainActivity : AppCompatActivity() {
 
             "x" -> {
                 employeeIdBuilder.clear()
-                ensurePinDots(3)             // start in “employee ID” mode
+                ensurePinDots(3)
                 promptText.text = "Please enter Employee ID"
                 resetInput()
                 Toast.makeText(this, "Employee ID cleared", Toast.LENGTH_SHORT).show()
@@ -509,13 +562,33 @@ class MainActivity : AppCompatActivity() {
                 if (employeeIdBuilder.length < 3) {
                     employeeIdBuilder.append(value)
                     updateDots(employeeIdBuilder.length)
+
                     if (employeeIdBuilder.length == 3) {
-                        promptForPin()
+                        val uuid = getDeviceUUID()
+                        if (uuid != null) {
+                            ApiService.checkDevicePinRequired(this, uuid) { pinRequired, error ->
+                                if (pinRequired == true) {
+                                    promptForPin()
+                                } else {
+                                    // PIN not required → go directly to action selection
+                                    currentEmployeeNumber = employeeIdBuilder.toString().toInt()
+                                    currentEmployeeName = "Employee #$currentEmployeeNumber"
+
+                                    fetchLastTimeRecord(currentEmployeeNumber) { record ->
+                                        showActionDialog(currentEmployeeName, record)
+                                    }
+                                }
+                            }
+                        } else {
+                            Toast.makeText(this, "Device UUID not found", Toast.LENGTH_SHORT).show()
+                            resetInput()
+                        }
                     }
                 }
             }
         }
     }
+
 
     private fun promptForPin() {
         currentState = InputState.PIN
